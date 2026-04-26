@@ -1,0 +1,26 @@
+__pycache__
+
+# configuration
+config.json
+*.pdf
+*.md
+*.pptx
+*.drawio
+*.js
+*.drawio
+*.html
+*.css
+*.mjs
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+*.svg
+*.eps
+*.pdf
+myslide*
+qa*
