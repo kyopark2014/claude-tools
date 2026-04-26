@@ -195,11 +195,10 @@
 ```java
 {
    "mcpServers":{
-      "image_generation":{
-         "command":"npx",
+      "imageGeneration":{
+         "command":"python",
          "args":[
-            "-y",
-            "image-generation-mcp"
+            "~/Documents/src/claude-tools/mcp/mcp_server_image_generation.py"
          ]
       }
    }
