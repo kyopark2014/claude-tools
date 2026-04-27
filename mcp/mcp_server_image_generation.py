@@ -6,6 +6,11 @@ import random
 import sys
 from typing import Optional
 
+# Strip empty AWS_BEARER_TOKEN_BEDROCK before boto3 import — an empty value
+# still hijacks the Bedrock auth path and produces an IncompleteSignatureException.
+if os.environ.get("AWS_BEARER_TOKEN_BEDROCK", None) == "":
+    del os.environ["AWS_BEARER_TOKEN_BEDROCK"]
+
 import boto3
 from botocore.config import Config
 from mcp.server.fastmcp import Context, FastMCP
@@ -26,46 +31,21 @@ VALID_ASPECT_RATIOS = [
     "2:3", "3:2", "21:9", "9:21"
 ]
 
+# Same profile resolution as `aws` CLI: $AWS_PROFILE, else $AWS_DEFAULT_PROFILE, else "default" in ~/.aws/credentials
+_BEDROCK_AWS_PROFILE = os.environ.get("AWS_PROFILE") or os.environ.get("AWS_DEFAULT_PROFILE", "default")
+_BEDROCK_CONFIG = Config(read_timeout=120, retries={"max_attempts": 2})
 try:
-    if aws_profile := os.environ.get('AWS_PROFILE'):
-        bedrock_client = boto3.Session(
-            profile_name=aws_profile, region_name=AWS_REGION
-        ).client('bedrock-runtime', config=Config(read_timeout=120, retries={"max_attempts": 2}))
-    else:
-        bedrock_client = boto3.Session(region_name=AWS_REGION).client(
-            'bedrock-runtime', config=Config(read_timeout=120, retries={"max_attempts": 2})
-        )
+    bedrock_client = boto3.Session(
+        profile_name=_BEDROCK_AWS_PROFILE,
+        region_name=AWS_REGION,
+    ).client("bedrock-runtime", config=_BEDROCK_CONFIG)
 except Exception as e:
-    logger.error(f'Failed to create bedrock client: {e}')
+    logger.error("Failed to create bedrock client: %s (profile=%s region=%s)", e, _BEDROCK_AWS_PROFILE, AWS_REGION)
     raise
 
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
-
-def _has_sharing_url() -> bool:
-    """Check if sharing_url is configured in config.json."""
-    try:
-        import utils
-        cfg = utils.load_config()
-        return bool(cfg.get("sharing_url"))
-    except Exception:
-        return False
-
-def _upload_to_s3(image_bytes: bytes, filename: str) -> Optional[str]:
-    """Upload image bytes to S3 via chat.upload_to_s3 if available."""
-    try:
-        import chat
-        url = chat.upload_to_s3(image_bytes, filename)
-        if url and url.startswith("http"):
-            logger.info(f"Uploaded to S3: {url}")
-            return url
-    except ImportError:
-        logger.warning("chat module not available, skipping S3 upload")
-    except Exception as e:
-        logger.error(f"S3 upload failed: {e}")
-    return None
-
 
 def _invoke_sd35(request_body: dict) -> dict:
     response = bedrock_client.invoke_model(
@@ -77,8 +57,8 @@ def _invoke_sd35(request_body: dict) -> dict:
     return json.loads(response["body"].read())
 
 
-def _save_and_upload(result: dict, prefix: str = "sd35l") -> dict:
-    """Process API result: check filtering, save/upload images, return structured response."""
+def _save_artifacts(result: dict, prefix: str = "sd35l") -> dict:
+    """Process API result: check filtering, save images under artifacts, return structured response."""
     finish_reasons = result.get("finish_reasons", [])
     if finish_reasons and finish_reasons[0] == "CONTENT_FILTERED":
         return {
@@ -96,18 +76,11 @@ def _save_and_upload(result: dict, prefix: str = "sd35l") -> dict:
             "path": [],
         }
 
-    use_s3 = _has_sharing_url()
     paths = []
-    for i, img_b64 in enumerate(images):
+    for img_b64 in images:
         image_bytes = base64.b64decode(img_b64)
         rand_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
         filename = f"{prefix}_{rand_id}.png"
-
-        if use_s3:
-            url = _upload_to_s3(image_bytes, filename)
-            if url:
-                paths.append(url)
-                continue
 
         os.makedirs(ARTIFACTS_DIR, exist_ok=True)
         local_path = os.path.join(ARTIFACTS_DIR, filename)
@@ -171,7 +144,7 @@ async def generate_image(
     - "watercolor illustration of a cozy cafe interior, warm tones, afternoon sunlight through windows"
 
     Returns:
-        dict with status, paths (list of image URLs or local paths), and seed used.
+        dict with status, path (list of local file paths), and seed used.
     """
     if aspect_ratio not in VALID_ASPECT_RATIOS:
         return {"status": "error", "error": f"Invalid aspect_ratio '{aspect_ratio}'. Valid: {VALID_ASPECT_RATIOS}", "path": []}
@@ -192,7 +165,7 @@ async def generate_image(
 
     try:
         result = _invoke_sd35(request_body)
-        return _save_and_upload(result)
+        return _save_artifacts(result)
     except Exception as e:
         error_msg = f"Image generation failed: {e}"
         logger.error(error_msg)
@@ -229,7 +202,7 @@ async def generate_image_from_image(
     The strength parameter controls how much the output differs from the input.
 
     Returns:
-        dict with status, paths (list of image URLs or local paths), and seed used.
+        dict with status, path (list of local file paths), and seed used.
     """
     if not prompt:
         return {"status": "error", "error": "prompt is required.", "path": []}
@@ -254,7 +227,7 @@ async def generate_image_from_image(
 
     try:
         result = _invoke_sd35(request_body)
-        return _save_and_upload(result, prefix="sd35l_i2i")            
+        return _save_artifacts(result, prefix="sd35l_i2i")            
 
     except Exception as e:
         error_msg = f"Image-to-image generation failed: {e}"
